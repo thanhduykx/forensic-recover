@@ -1,0 +1,112 @@
+name: Forensic Recover CI Matrix
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+jobs:
+  core-and-cli:
+    name: Rust Core, CLI & JNI (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Clippy lints
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Run full workspace & forensic corpus tests
+        run: cargo test --workspace
+
+      - name: Verify CLI source SHA-256 immutability end-to-end
+        shell: bash
+        run: |
+          cargo build --release -p recover-cli
+          mkdir -p /tmp/ci_recover_out
+          HASH_BEFORE=$(sha256sum crates/recover-core/tests/fixtures/mini_deleted.img | awk '{print $1}')
+          ./target/release/recover scan --source crates/recover-core/tests/fixtures/mini_deleted.img --out /tmp/ci_recover_out --types jpg,png
+          HASH_AFTER=$(sha256sum crates/recover-core/tests/fixtures/mini_deleted.img | awk '{print $1}')
+          test "$HASH_BEFORE" = "$HASH_AFTER"
+          test -f /tmp/ci_recover_out/report.html
+          test -f /tmp/ci_recover_out/report.json
+
+  desktop-ui:
+    name: Desktop UI & Tauri (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Build TypeScript/Vite Desktop UI
+        working-directory: apps/desktop
+        run: |
+          npm ci || npm install
+          npm run build
+
+      - name: Install Linux WebKitGTK deps
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+
+      - name: Check Tauri Rust crate
+        working-directory: apps/desktop/src-tauri
+        run: cargo check
+
+  android-jni-and-apk:
+    name: Android JNI (cargo-ndk) & APK
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,x86_64-linux-android
+      - name: Install cargo-ndk & build librecover_jni.so
+        run: |
+          cargo install cargo-ndk
+          cargo ndk -t arm64-v8a -t x86_64 -o apps/android/app/src/main/jniLibs build --release -p recover-jni
+      - name: Validate Android Gradle build
+        working-directory: apps/android
+        run: |
+          if [ -x ./gradlew ]; then
+            ./gradlew assembleDebug
+          else
+            gradle assembleDebug
+          fi
+
+  ios-swift-and-ipa:
+    name: iOS Swift Package & Unsigned IPA Check
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build Swift Package
+        working-directory: apps/ios
+        run: swift build
+      - name: Generate Xcode project & build unsigned archive
+        working-directory: apps/ios
+        run: |
+          brew install xcodegen
+          xcodegen generate
+          xcodebuild -project ForensicRecoverIOS.xcodeproj -scheme ForensicRecoverIOS -sdk iphoneos CODE_SIGNING_ALLOWED=NO build

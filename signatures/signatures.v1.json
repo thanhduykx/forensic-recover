@@ -1,0 +1,102 @@
+{
+  "version": "1.0.0",
+  "description": "Forensic Recover Versioned Signature Database (header/footer + structural validator mappings)",
+  "rules": [
+    {
+      "sig_id": "jpg-jfif-exif",
+      "family": "image",
+      "mime": "image/jpeg",
+      "ext": "jpg",
+      "header_hex": "ffd8ff",
+      "header_offset": 0,
+      "footer_hex": "ffd9",
+      "min_len": 128,
+      "max_len": 67108864,
+      "validator_ref": "jpeg"
+    },
+    {
+      "sig_id": "png-std",
+      "family": "image",
+      "mime": "image/png",
+      "ext": "png",
+      "header_hex": "89504e470d0a1a0a",
+      "header_offset": 0,
+      "footer_hex": "49454e44ae426082",
+      "min_len": 67,
+      "max_len": 134217728,
+      "validator_ref": "png"
+    },
+    {
+      "sig_id": "gif-89a",
+      "family": "image",
+      "mime": "image/gif",
+      "ext": "gif",
+      "header_hex": "474946383961",
+      "header_offset": 0,
+      "footer_hex": "003b",
+      "min_len": 35,
+      "max_len": 67108864,
+      "validator_ref": "gif"
+    },
+    {
+      "sig_id": "gif-87a",
+      "family": "image",
+      "mime": "image/gif",
+      "ext": "gif",
+      "header_hex": "474946383761",
+      "header_offset": 0,
+      "footer_hex": "003b",
+      "min_len": 35,
+      "max_len": 67108864,
+      "validator_ref": "gif"
+    },
+    {
+      "sig_id": "webp-riff",
+      "family": "image",
+      "mime": "image/webp",
+      "ext": "webp",
+      "header_hex": "52494646",
+      "header_offset": 0,
+      "footer_hex": null,
+      "min_len": 28,
+      "max_len": 67108864,
+      "validator_ref": "webp"
+    },
+    {
+      "sig_id": "bmff-ftyp",
+      "family": "media",
+      "mime": "video/mp4",
+      "ext": "mp4",
+      "header_hex": "66747970",
+      "header_offset": 4,
+      "footer_hex": null,
+      "min_len": 64,
+      "max_len": 2147483648,
+      "validator_ref": "bmff"
+    },
+    {
+      "sig_id": "pdf-std",
+      "family": "document",
+      "mime": "application/pdf",
+      "ext": "pdf",
+      "header_hex": "255044462d",
+      "header_offset": 0,
+      "footer_hex": "2525454f46",
+      "min_len": 64,
+      "max_len": 268435456,
+      "validator_ref": "pdf"
+    },
+    {
+      "sig_id": "zip-ooxml",
+      "family": "archive",
+      "mime": "application/zip",
+      "ext": "zip",
+      "header_hex": "504b0304",
+      "header_offset": 0,
+      "footer_hex": "504b0506",
+      "min_len": 52,
+      "max_len": 268435456,
+      "validator_ref": "zip_ooxml"
+    }
+  ]
+}

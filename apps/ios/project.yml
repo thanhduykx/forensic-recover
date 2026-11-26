@@ -1,0 +1,25 @@
+name: ForensicRecoverIOS
+options:
+  bundleIdPrefix: com.forensic.recover
+  deploymentTarget:
+    iOS: "15.0"
+targets:
+  ForensicRecoverIOS:
+    type: application
+    platform: iOS
+    sources:
+      - path: Sources/ForensicRecoverIOS
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.forensic.recover.ios
+        GENERATE_INFOPLIST_FILE: "YES"
+        INFOPLIST_KEY_NSPhotoLibraryUsageDescription: "Read-only inspection of PhotoKit assets and Recently Deleted metadata"
+        INFOPLIST_KEY_UIApplicationSceneManifest_Generation: true
+        INFOPLIST_KEY_UILaunchScreen_Generation: true
+        INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents: true
+        SUPPORTED_PLATFORMS: "iphoneos iphonesimulator"
+        TARGETED_DEVICE_FAMILY: "1,2"
+        CODE_SIGN_IDENTITY: ""
+        CODE_SIGNING_ALLOWED: "NO"
+        CODE_SIGNING_REQUIRED: "NO"
+        SWIFT_VERSION: "5.9"

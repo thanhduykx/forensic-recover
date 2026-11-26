@@ -1,0 +1,9 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Offline capability permissions for Forensic Recover UI",
+  "windows": ["main"],
+  "permissions": [
+    "core:default"
+  ]
+}
