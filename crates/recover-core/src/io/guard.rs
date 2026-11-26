@@ -221,6 +221,7 @@ fn check_platform_disk_overlap(
     warnings: &mut Vec<String>,
 ) -> Result<()> {
     use std::os::unix::fs::MetadataExt;
+    use std::path::PathBuf;
 
     let src_path = Path::new(source);
     if let (Ok(src_meta), Ok(out_meta)) = (std::fs::metadata(src_path), std::fs::metadata(out_canon)) {

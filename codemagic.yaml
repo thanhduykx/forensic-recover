@@ -1,0 +1,53 @@
+workflows:
+  forensic-recover-ios-unsigned-ipa:
+    name: Build ForensicRecover Unsigned IPA (macOS M2 Free Tier)
+    max_build_duration: 30
+    instance_type: mac_mini_m2
+    environment:
+      xcode: latest
+    triggering:
+      events:
+        - push
+      branch_patterns:
+        - pattern: main
+          include: true
+          source: true
+    scripts:
+      - name: Install XcodeGen & Generate Xcode Project
+        script: |
+          command -v xcodegen >/dev/null 2>&1 || HOMEBREW_NO_AUTO_UPDATE=1 brew install xcodegen
+          cd apps/ios
+          xcodegen generate
+      - name: Smoke Build for iOS Simulator
+        script: |
+          set -o pipefail
+          cd apps/ios
+          xcodebuild build \
+            -project ForensicRecoverIOS.xcodeproj \
+            -scheme ForensicRecoverIOS \
+            -configuration Debug \
+            -destination 'generic/platform=iOS Simulator' \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO
+      - name: Build & Package Unsigned IPA (iphoneos)
+        script: |
+          set -o pipefail
+          cd apps/ios
+          xcodebuild clean archive \
+            -project ForensicRecoverIOS.xcodeproj \
+            -scheme ForensicRecoverIOS \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -archivePath "$PWD/build/ForensicRecoverIOS.xcarchive" \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO
+          mkdir -p build/Payload
+          cp -R build/ForensicRecoverIOS.xcarchive/Products/Applications/*.app build/Payload/
+          cd build
+          zip -r ForensicRecover-iOS-Unsigned.ipa Payload
+          rm -rf Payload
+    artifacts:
+      - apps/ios/build/ForensicRecover-iOS-Unsigned.ipa

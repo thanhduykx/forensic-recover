@@ -380,12 +380,12 @@ fn open_raw_device(source: &str) -> Result<Box<dyn BlockReader>> {
 }
 
 #[cfg(unix)]
-fn query_unix_block_size(file: &File, fd: libc::c_int) -> Result<(u64, u32)> {
+fn query_unix_block_size(file: &File, _fd: libc::c_int) -> Result<(u64, u32)> {
     #[cfg(target_os = "linux")]
     {
         const BLKGETSIZE64: libc::c_ulong = 0x80081272;
         let mut bytes: u64 = 0;
-        let rc = unsafe { libc::ioctl(fd, BLKGETSIZE64 as _, &mut bytes) };
+        let rc = unsafe { libc::ioctl(_fd, BLKGETSIZE64 as _, &mut bytes) };
         if rc == 0 && bytes > 0 {
             return Ok((bytes, 512));
         }
@@ -397,8 +397,8 @@ fn query_unix_block_size(file: &File, fd: libc::c_int) -> Result<(u64, u32)> {
         let mut blk_size: u32 = 512;
         let mut blk_count: u64 = 0;
         unsafe {
-            libc::ioctl(fd, DKIOCGETBLOCKSIZE, &mut blk_size);
-            if libc::ioctl(fd, DKIOCGETBLOCKCOUNT, &mut blk_count) == 0 && blk_count > 0 {
+            libc::ioctl(_fd, DKIOCGETBLOCKSIZE, &mut blk_size);
+            if libc::ioctl(_fd, DKIOCGETBLOCKCOUNT, &mut blk_count) == 0 && blk_count > 0 {
                 return Ok((blk_count.saturating_mul(blk_size as u64), blk_size.max(512)));
             }
         }
