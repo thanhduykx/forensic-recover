@@ -61,11 +61,41 @@ export interface ScanProgress {
   phase: string;
 }
 
+export interface DriveInfo {
+  id: string;
+  letter: string;
+  label: string;
+  drive_type: "removable" | "fixed" | "network" | "other";
+  total_bytes: number;
+  free_bytes: number;
+  is_system: boolean;
+}
+
+export interface IosBackupCandidate {
+  path: string;
+  name: string;
+}
+
 export interface SourceListResponse {
   sources: string[];
+  drives?: DriveInfo[];
+  ios_backups?: IosBackupCandidate[];
+  is_admin?: boolean;
+  demo_available?: boolean;
   vss_snapshots: string[];
   adb_devices: Array<{ serial: string; state: string; rooted: boolean; fbe_encrypted: boolean }>;
   ios_udids: string | null;
+}
+
+export interface SuggestOutResponse {
+  out_dir: string;
+  needs_external_drive: boolean;
+  message: string | null;
+}
+
+export interface PickerResponse {
+  path: string | null;
+  cancelled: boolean;
 }
 
 export interface DestinationCheckResponse {
@@ -92,6 +122,8 @@ export interface ScanStatusResponse {
   running: boolean;
   progress: ScanProgress | null;
   last_error: string | null;
+  last_out_dir?: string | null;
+  report_html_path?: string | null;
   session: ScanSession | null;
   items_count: number;
 }
@@ -133,6 +165,35 @@ export const Api = {
     return httpJson("/api/sources");
   },
 
+  async suggestOutDir(source: string): Promise<SuggestOutResponse> {
+    return httpJson("/api/suggest-out-dir", {
+      method: "POST",
+      body: JSON.stringify({ source })
+    });
+  },
+
+  async getDemoSource(): Promise<{ source: string; suggested_out_dir: string }> {
+    return httpJson("/api/demo-source", {
+      method: "POST",
+      body: "{}"
+    });
+  },
+
+  async pickFile(): Promise<PickerResponse> {
+    return httpJson("/api/pick-file", { method: "POST", body: "{}" });
+  },
+
+  async pickFolder(): Promise<PickerResponse> {
+    return httpJson("/api/pick-folder", { method: "POST", body: "{}" });
+  },
+
+  async openFolder(path: string): Promise<{ opened: boolean }> {
+    return httpJson("/api/open-folder", {
+      method: "POST",
+      body: JSON.stringify({ path })
+    });
+  },
+
   async inspectSource(source: string): Promise<SourceInspectInfo> {
     if (isTauri()) return tauriInvoke("inspect_source_cmd", { source });
     return httpJson("/api/inspect", {
@@ -172,11 +233,14 @@ export const Api = {
     });
   },
 
-  async scanIosBackup(backupDir: string, outDir: string): Promise<{ session: ScanSession; items_count: number }> {
+  async scanIosBackup(
+    backupDir: string,
+    outDir: string
+  ): Promise<{ session: ScanSession; items_count: number; exported_count?: number; report_html_path?: string }> {
     if (isTauri()) return tauriInvoke("scan_ios_backup_cmd", { backupDir, outDir });
     return httpJson("/api/ios-backup", {
       method: "POST",
-      body: JSON.stringify({ backup_dir: backupDir, out_dir: outDir, export_all: false })
+      body: JSON.stringify({ backup_dir: backupDir, out_dir: outDir, export_all: true })
     });
   },
 

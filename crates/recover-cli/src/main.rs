@@ -12,8 +12,9 @@ use std::path::PathBuf;
     about = "Read-only digital forensics & unallocated media/document recovery CLI"
 )]
 struct Cli {
+    /// Subcommand to run. If omitted (e.g. double-clicking the .exe), launches the Desktop UI automatically.
     #[command(subcommand)]
-    command: Commands,
+    command: Option<Commands>,
 }
 
 #[derive(Subcommand)]
@@ -86,13 +87,21 @@ enum Commands {
         port: u16,
         #[arg(long)]
         dist: Option<PathBuf>,
+        /// Do not automatically open the browser when the server starts
+        #[arg(long, default_value_t = false)]
+        no_open: bool,
     },
 }
 
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
-    match cli.command {
+    let Some(command) = cli.command else {
+        // Default when double-clicked without arguments: launch local UI & open browser.
+        return ui_server::serve_ui(1420, None, true);
+    };
+
+    match command {
         Commands::Scan {
             source,
             out,
@@ -181,8 +190,12 @@ fn main() -> anyhow::Result<()> {
             let paths = ScanFacade::export_selected(&source, &out, &item_ids)?;
             println!("Exported {} file(s) safely.", paths.len());
         }
-        Commands::Ui { port, dist } => {
-            ui_server::serve_ui(port, dist)?;
+        Commands::Ui {
+            port,
+            dist,
+            no_open,
+        } => {
+            ui_server::serve_ui(port, dist, !no_open)?;
         }
     }
 

@@ -19,7 +19,10 @@ data class AndroidCandidate(
     val confidence: String,
     val sha256Prefix: String,
     val contentUri: Uri? = null,
-    val filePath: String? = null
+    val filePath: String? = null,
+    val jniItemId: String? = null,
+    val jniSourcePath: String? = null,
+    val jniOutDir: String? = null
 )
 
 /**
@@ -29,31 +32,59 @@ data class AndroidCandidate(
  * - Validates actual magic headers rather than trusting missing/renamed file extensions.
  */
 object NonRootScanner {
-    fun scanAll(context: Context, onProgress: (Int, String) -> Unit): List<AndroidCandidate> {
+    fun scanAll(
+        context: Context,
+        isCancelled: () -> Boolean = { false },
+        onProgress: (Int, String) -> Unit
+    ): List<AndroidCandidate> {
         val out = mutableListOf<AndroidCandidate>()
-        onProgress(15, "Querying MediaStore (incl. trashed & pending)...")
-        out += scanMediaStore(context)
+        val seenKeys = HashSet<String>()
 
-        onProgress(45, "Scanning .trashed & LOST.DIR directories...")
-        val extRoot = Environment.getExternalStorageDirectory()
-        out += scanDirectoryMagic(File(extRoot, "LOST.DIR"), "LOST.DIR", "medium")
-        out += scanTrashedFolders(extRoot)
-
-        onProgress(80, "Scanning accessible app caches...")
-        val androidData = File(extRoot, "Android/data")
-        if (androidData.exists() && androidData.canRead()) {
-            androidData.listFiles()?.forEach { pkgDir ->
-                val cache = File(pkgDir, "cache")
-                if (cache.exists() && cache.canRead()) {
-                    out += scanDirectoryMagic(cache, "AppCache:${pkgDir.name}", "low")
+        fun addUnique(items: List<AndroidCandidate>) {
+            for (item in items) {
+                val key = item.filePath ?: item.contentUri?.toString() ?: item.id
+                if (seenKeys.add(key)) {
+                    out += item
                 }
             }
         }
-        onProgress(100, "Completed non-root scan (${out.size} validated items)")
+
+        if (isCancelled()) return out
+        onProgress(15, "Đang quét MediaStore (bao gồm thùng rác .trashed & pending)...")
+        addUnique(scanMediaStore(context, isCancelled))
+
+        if (isCancelled()) return out
+        onProgress(45, "Đang quét thư mục LOST.DIR và .trashed...")
+        val extRoot = Environment.getExternalStorageDirectory()
+        addUnique(scanDirectoryMagic(File(extRoot, "LOST.DIR"), "LOST.DIR", "medium", isCancelled))
+
+        if (isCancelled()) return out
+        onProgress(65, "Đang kiểm tra tệp .trashed trong DCIM / Pictures / Download...")
+        addUnique(scanTrashedFolders(extRoot, isCancelled))
+
+        if (isCancelled()) return out
+        onProgress(82, "Đang quét bộ nhớ đệm ứng dụng có thể đọc...")
+        val androidData = File(extRoot, "Android/data")
+        if (androidData.exists() && androidData.canRead()) {
+            androidData.listFiles()?.forEach { pkgDir ->
+                if (isCancelled()) return out
+                val cache = File(pkgDir, "cache")
+                if (cache.exists() && cache.canRead()) {
+                    addUnique(scanDirectoryMagic(cache, "AppCache:${pkgDir.name}", "low", isCancelled))
+                }
+            }
+        }
+
+        if (!isCancelled()) {
+            onProgress(100, "Hoàn tất quét (${out.size} tệp đã xác thực)")
+        }
         return out
     }
 
-    private fun scanMediaStore(context: Context): List<AndroidCandidate> {
+    private fun scanMediaStore(
+        context: Context,
+        isCancelled: () -> Boolean
+    ): List<AndroidCandidate> {
         val list = mutableListOf<AndroidCandidate>()
         val uri = MediaStore.Files.getContentUri("external")
         val projection = mutableListOf(
@@ -69,18 +100,25 @@ object NonRootScanner {
             projection += MediaStore.MediaColumns.IS_TRASHED
         }
 
-        val cursor = context.contentResolver.query(uri, projection.toTypedArray(), null, null, null)
-            ?: return list
+        val cursor = try {
+            context.contentResolver.query(uri, projection.toTypedArray(), null, null, null)
+        } catch (_: SecurityException) {
+            null
+        } catch (_: Exception) {
+            null
+        } ?: return list
 
         cursor.use { c ->
-            val idIdx = c.getColumnIndexOrThrow(MediaStore.Files.FileColumns._ID)
-            val nameIdx = c.getColumnIndexOrThrow(MediaStore.Files.FileColumns.DISPLAY_NAME)
-            val sizeIdx = c.getColumnIndexOrThrow(MediaStore.Files.FileColumns.SIZE)
+            val idIdx = c.getColumnIndex(MediaStore.Files.FileColumns._ID)
+            val nameIdx = c.getColumnIndex(MediaStore.Files.FileColumns.DISPLAY_NAME)
+            val sizeIdx = c.getColumnIndex(MediaStore.Files.FileColumns.SIZE)
+            if (idIdx < 0 || nameIdx < 0 || sizeIdx < 0) return list
             val trashedIdx = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
                 c.getColumnIndex(MediaStore.MediaColumns.IS_TRASHED)
             } else -1
 
             while (c.moveToNext()) {
+                if (isCancelled()) break
                 val id = c.getLong(idIdx)
                 val name = c.getString(nameIdx) ?: "media_$id"
                 val size = c.getLong(sizeIdx)
@@ -104,22 +142,28 @@ object NonRootScanner {
         return list
     }
 
-    private fun scanTrashedFolders(root: File): List<AndroidCandidate> {
+    private fun scanTrashedFolders(
+        root: File,
+        isCancelled: () -> Boolean
+    ): List<AndroidCandidate> {
         val out = mutableListOf<AndroidCandidate>()
         val dirs = listOf(File(root, "DCIM"), File(root, "Pictures"), File(root, "Download"))
         for (dir in dirs) {
+            if (isCancelled()) break
             if (!dir.exists() || !dir.canRead()) continue
-            dir.walkTopDown().maxDepth(3).forEach { f ->
+            for (f in dir.walkTopDown().maxDepth(3)) {
+                if (isCancelled()) break
                 if (f.isFile && f.name.startsWith(".trashed")) {
-                    val ext = sniffFileMagic(f) ?: return@forEach
+                    val ext = sniffFileMagic(f) ?: continue
+                    val hash = quickSha256Prefix(f)
                     out += AndroidCandidate(
-                        id = "file_${f.absolutePath.hashCode()}",
+                        id = "file_${f.absolutePath.hashCode()}_$hash",
                         title = f.name,
                         origin = ".trashed",
                         detectedExt = ext,
                         sizeBytes = f.length(),
                         confidence = "high",
-                        sha256Prefix = quickSha256Prefix(f),
+                        sha256Prefix = hash,
                         filePath = f.absolutePath
                     )
                 }
@@ -128,20 +172,27 @@ object NonRootScanner {
         return out
     }
 
-    private fun scanDirectoryMagic(dir: File, origin: String, conf: String): List<AndroidCandidate> {
+    private fun scanDirectoryMagic(
+        dir: File,
+        origin: String,
+        conf: String,
+        isCancelled: () -> Boolean
+    ): List<AndroidCandidate> {
         if (!dir.exists() || !dir.canRead()) return emptyList()
         val out = mutableListOf<AndroidCandidate>()
-        dir.walkTopDown().maxDepth(3).forEach { f ->
+        for (f in dir.walkTopDown().maxDepth(3)) {
+            if (isCancelled()) break
             if (f.isFile && f.length() >= 64) {
-                val ext = sniffFileMagic(f) ?: return@forEach
+                val ext = sniffFileMagic(f) ?: continue
+                val hash = quickSha256Prefix(f)
                 out += AndroidCandidate(
-                    id = "f_${f.absolutePath.hashCode()}",
+                    id = "f_${f.absolutePath.hashCode()}_$hash",
                     title = f.name,
                     origin = origin,
                     detectedExt = ext,
                     sizeBytes = f.length(),
                     confidence = conf,
-                    sha256Prefix = quickSha256Prefix(f),
+                    sha256Prefix = hash,
                     filePath = f.absolutePath
                 )
             }
@@ -169,7 +220,7 @@ object NonRootScanner {
         null
     }
 
-    private fun classifyMagic(h: ByteArray): String? {
+    internal fun classifyMagic(h: ByteArray): String? {
         if (h.size >= 3 && h[0] == 0xFF.toByte() && h[1] == 0xD8.toByte() && h[2] == 0xFF.toByte()) return "jpg"
         if (h.size >= 8 && h[0] == 0x89.toByte() && h[1] == 0x50.toByte() && h[2] == 0x4E.toByte() && h[3] == 0x47.toByte()) return "png"
         if (h.size >= 6 && String(h, 0, 6) in listOf("GIF87a", "GIF89a")) return "gif"
