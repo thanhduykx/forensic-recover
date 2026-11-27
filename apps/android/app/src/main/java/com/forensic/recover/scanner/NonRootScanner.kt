@@ -4,6 +4,7 @@ import android.content.ContentUris
 import android.content.Context
 import android.net.Uri
 import android.os.Build
+import android.os.Bundle
 import android.os.Environment
 import android.provider.MediaStore
 import java.io.File
@@ -86,12 +87,17 @@ object NonRootScanner {
         isCancelled: () -> Boolean
     ): List<AndroidCandidate> {
         val list = mutableListOf<AndroidCandidate>()
-        val uri = MediaStore.Files.getContentUri("external")
+        val seenIds = HashSet<Long>()
+        val collections = listOf(
+            MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+            MediaStore.Video.Media.EXTERNAL_CONTENT_URI,
+            MediaStore.Files.getContentUri("external")
+        )
         val projection = mutableListOf(
-            MediaStore.Files.FileColumns._ID,
-            MediaStore.Files.FileColumns.DISPLAY_NAME,
-            MediaStore.Files.FileColumns.SIZE,
-            MediaStore.Files.FileColumns.MIME_TYPE
+            MediaStore.MediaColumns._ID,
+            MediaStore.MediaColumns.DISPLAY_NAME,
+            MediaStore.MediaColumns.SIZE,
+            MediaStore.MediaColumns.MIME_TYPE
         )
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             projection += MediaStore.MediaColumns.IS_PENDING
@@ -100,43 +106,75 @@ object NonRootScanner {
             projection += MediaStore.MediaColumns.IS_TRASHED
         }
 
-        val cursor = try {
-            context.contentResolver.query(uri, projection.toTypedArray(), null, null, null)
-        } catch (_: SecurityException) {
-            null
-        } catch (_: Exception) {
-            null
-        } ?: return list
+        for (collectionUri in collections) {
+            if (isCancelled()) break
+            val cursor = try {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                    val queryArgs = Bundle().apply {
+                        putInt(MediaStore.QUERY_ARG_MATCH_TRASHED, MediaStore.MATCH_INCLUDE)
+                        putInt(MediaStore.QUERY_ARG_MATCH_PENDING, MediaStore.MATCH_INCLUDE)
+                    }
+                    context.contentResolver.query(
+                        collectionUri,
+                        projection.toTypedArray(),
+                        queryArgs,
+                        null
+                    )
+                } else {
+                    context.contentResolver.query(
+                        collectionUri,
+                        projection.toTypedArray(),
+                        null,
+                        null,
+                        null
+                    )
+                }
+            } catch (_: SecurityException) {
+                null
+            } catch (_: Exception) {
+                null
+            } ?: continue
 
-        cursor.use { c ->
-            val idIdx = c.getColumnIndex(MediaStore.Files.FileColumns._ID)
-            val nameIdx = c.getColumnIndex(MediaStore.Files.FileColumns.DISPLAY_NAME)
-            val sizeIdx = c.getColumnIndex(MediaStore.Files.FileColumns.SIZE)
-            if (idIdx < 0 || nameIdx < 0 || sizeIdx < 0) return list
-            val trashedIdx = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                c.getColumnIndex(MediaStore.MediaColumns.IS_TRASHED)
-            } else -1
+            cursor.use { c ->
+                val idIdx = c.getColumnIndex(MediaStore.MediaColumns._ID)
+                val nameIdx = c.getColumnIndex(MediaStore.MediaColumns.DISPLAY_NAME)
+                val sizeIdx = c.getColumnIndex(MediaStore.MediaColumns.SIZE)
+                if (idIdx < 0 || nameIdx < 0 || sizeIdx < 0) return@use
+                val trashedIdx = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                    c.getColumnIndex(MediaStore.MediaColumns.IS_TRASHED)
+                } else -1
+                val pendingIdx = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    c.getColumnIndex(MediaStore.MediaColumns.IS_PENDING)
+                } else -1
 
-            while (c.moveToNext()) {
-                if (isCancelled()) break
-                val id = c.getLong(idIdx)
-                val name = c.getString(nameIdx) ?: "media_$id"
-                val size = c.getLong(sizeIdx)
-                val isTrashed = trashedIdx >= 0 && c.getInt(trashedIdx) == 1
-                if (!isTrashed && !name.startsWith(".trashed")) continue
+                while (c.moveToNext()) {
+                    if (isCancelled()) break
+                    val id = c.getLong(idIdx)
+                    if (!seenIds.add(id)) continue
+                    val name = c.getString(nameIdx) ?: "media_$id"
+                    val size = c.getLong(sizeIdx)
+                    val isTrashed = trashedIdx >= 0 && c.getInt(trashedIdx) == 1
+                    val isPending = pendingIdx >= 0 && c.getInt(pendingIdx) == 1
+                    if (!isTrashed && !isPending && !name.startsWith(".trashed")) continue
 
-                val itemUri = ContentUris.withAppendedId(uri, id)
-                val ext = sniffUriMagic(context, itemUri) ?: continue
-                list += AndroidCandidate(
-                    id = "ms_$id",
-                    title = name,
-                    origin = if (isTrashed) "MediaStore.IS_TRASHED" else ".trashed",
-                    detectedExt = ext,
-                    sizeBytes = size,
-                    confidence = "high",
-                    sha256Prefix = "uri:$id",
-                    contentUri = itemUri
-                )
+                    val itemUri = ContentUris.withAppendedId(collectionUri, id)
+                    val ext = sniffUriMagic(context, itemUri) ?: continue
+                    val originLabel = when {
+                        isTrashed -> "MediaStore.IS_TRASHED"
+                        isPending -> "MediaStore.IS_PENDING"
+                        else -> ".trashed"
+                    }
+                    list += AndroidCandidate(
+                        id = "ms_$id",
+                        title = name,
+                        origin = originLabel,
+                        detectedExt = ext,
+                        sizeBytes = size,
+                        confidence = "high",
+                        sha256Prefix = "uri:$id",
+                        contentUri = itemUri
+                    )
+                }
             }
         }
         return list

@@ -251,4 +251,60 @@ mod tests {
         assert!(flag.load(Ordering::Relaxed));
         assert!(!cancel_scan_by_key("missing"));
     }
+
+    #[test]
+    fn test_jni_scan_and_export_selected_roundtrip() {
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../recover-core/tests/fixtures/mini_deleted.img");
+        assert!(fixture.exists(), "fixture missing: {}", fixture.display());
+
+        let uniq = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let out_dir = std::env::temp_dir().join(format!("recover_jni_out_{uniq}"));
+        let empty_dir = std::env::temp_dir().join(format!("recover_jni_empty_{uniq}"));
+        std::fs::create_dir_all(&out_dir).unwrap();
+        std::fs::create_dir_all(&empty_dir).unwrap();
+
+        let cfg = serde_json::json!({
+            "session_key": "jni-rt-test",
+            "source": fixture.to_string_lossy(),
+            "out_dir": out_dir.to_string_lossy(),
+            "types": [],
+            "include_allocated": false,
+            "bifragment_gap_mb": 16,
+            "export_all": false
+        });
+        let scan_resp: serde_json::Value =
+            serde_json::from_str(&run_scan_json(&cfg.to_string())).unwrap();
+        assert_eq!(scan_resp["ok"], true, "scan failed: {scan_resp}");
+        let items = scan_resp["data"]["items"].as_array().unwrap();
+        assert!(!items.is_empty(), "expected recovered items from fixture");
+        let first_id = items[0]["id"].as_str().unwrap().to_string();
+        let ids_json = serde_json::to_string(&vec![first_id]).unwrap();
+
+        // Passing an empty directory without checkpoint MUST fail.
+        let bad_export: serde_json::Value = serde_json::from_str(&export_items_json(
+            &fixture.to_string_lossy(),
+            &empty_dir.to_string_lossy(),
+            &ids_json,
+        ))
+        .unwrap();
+        assert_eq!(bad_export["ok"], false);
+
+        // Passing the scan session's `out_dir` MUST succeed and produce a real file on disk.
+        let ok_export: serde_json::Value = serde_json::from_str(&export_items_json(
+            &fixture.to_string_lossy(),
+            &out_dir.to_string_lossy(),
+            &ids_json,
+        ))
+        .unwrap();
+        assert_eq!(ok_export["ok"], true, "export failed: {ok_export}");
+        let exported_path = ok_export["data"][0].as_str().unwrap();
+        assert!(Path::new(exported_path).exists());
+
+        let _ = std::fs::remove_dir_all(&out_dir);
+        let _ = std::fs::remove_dir_all(&empty_dir);
+    }
 }

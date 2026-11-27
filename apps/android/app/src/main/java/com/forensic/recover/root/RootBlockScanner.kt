@@ -5,6 +5,7 @@ import com.forensic.recover.scanner.AndroidCandidate
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
 
 data class RootCapabilities(
@@ -29,6 +30,8 @@ data class RootScanResult(
 object RootBlockScanner {
     const val ROOT_SESSION_KEY = "android-root"
     private val activeDdProcess = AtomicReference<Process?>(null)
+    @Volatile
+    private var lastProbedUserdataPath: String? = null
 
     fun probe(): RootCapabilities {
         val suResult = runSu("id")
@@ -44,6 +47,7 @@ object RootBlockScanner {
         } else {
             null
         }
+        lastProbedUserdataPath = userdata
 
         val sdBlocks = if (hasRoot) {
             runSu("ls /dev/block/mmcblk1* 2>/dev/null")
@@ -79,12 +83,27 @@ object RootBlockScanner {
         }
     }
 
-    internal fun isUnsafeSameVolumeDest(blockDevice: String, destPath: String): Boolean {
-        if (!blockDevice.contains("userdata", ignoreCase = true)) return false
-        val norm = destPath.replace('\\', '/')
-        return norm.startsWith("/data/") ||
-            norm == "/data" ||
+    internal fun isUserdataBlock(blockDevice: String, knownUserdataPath: String? = lastProbedUserdataPath): Boolean {
+        val dev = blockDevice.trim()
+        if (dev.isEmpty()) return false
+        if (dev.contains("userdata", ignoreCase = true)) return true
+        val known = knownUserdataPath?.trim()
+        if (!known.isNullOrEmpty() && dev == known) return true
+        return false
+    }
+
+    internal fun isUnsafeSameVolumeDest(
+        blockDevice: String,
+        destPath: String,
+        knownUserdataPath: String? = lastProbedUserdataPath
+    ): Boolean {
+        if (!isUserdataBlock(blockDevice, knownUserdataPath)) return false
+        val norm = destPath.trim().replace('\\', '/').trimEnd('/')
+        return norm == "/data" ||
+            norm.startsWith("/data/") ||
+            norm == "/storage/emulated" ||
             norm.startsWith("/storage/emulated/") ||
+            norm == "/sdcard" ||
             norm.startsWith("/sdcard/")
     }
 
@@ -98,10 +117,13 @@ object RootBlockScanner {
         destImageFile: File,
         outDir: File,
         types: List<String> = emptyList(),
+        knownUserdataPath: String? = lastProbedUserdataPath,
         isCancelled: () -> Boolean = { false },
         onProgressText: (Int, String) -> Unit
     ): RootScanResult {
-        if (isUnsafeSameVolumeDest(blockDevice, destImageFile.absolutePath)) {
+        if (isUnsafeSameVolumeDest(blockDevice, destImageFile.absolutePath, knownUserdataPath) ||
+            isUnsafeSameVolumeDest(blockDevice, outDir.absolutePath, knownUserdataPath)
+        ) {
             return RootScanResult(
                 ok = false,
                 error = "Từ chối ghi ảnh phân vùng /userdata vào bộ nhớ trong (/data hoặc /storage/emulated). Hãy chọn thẻ nhớ ngoài SD hoặc USB-OTG."
@@ -219,16 +241,32 @@ object RootBlockScanner {
         }
     }
 
-    private fun runSu(cmd: String): String? = try {
-        val p = ProcessBuilder("su", "-c", cmd).redirectErrorStream(true).start()
-        p.inputStream.bufferedReader().readText().also { p.waitFor() }
-    } catch (_: Exception) {
-        null
-    }
+    private fun runSu(cmd: String): String? = runWithTimeout(listOf("su", "-c", cmd), timeoutSec = 5L)
 
-    private fun runShell(cmd: String): String? = try {
-        val p = ProcessBuilder("sh", "-c", cmd).redirectErrorStream(true).start()
-        p.inputStream.bufferedReader().readText().also { p.waitFor() }
+    private fun runShell(cmd: String): String? = runWithTimeout(listOf("sh", "-c", cmd), timeoutSec = 5L)
+
+    private fun runWithTimeout(args: List<String>, timeoutSec: Long): String? = try {
+        val p = ProcessBuilder(args).redirectErrorStream(true).start()
+        val output = StringBuilder()
+        val reader = Thread {
+            try {
+                p.inputStream.bufferedReader().use { br ->
+                    output.append(br.readText())
+                }
+            } catch (_: Exception) {
+            }
+        }.apply {
+            isDaemon = true
+            start()
+        }
+        val finished = p.waitFor(timeoutSec, TimeUnit.SECONDS)
+        if (!finished) {
+            p.destroyForcibly()
+            null
+        } else {
+            reader.join(500L)
+            output.toString()
+        }
     } catch (_: Exception) {
         null
     }

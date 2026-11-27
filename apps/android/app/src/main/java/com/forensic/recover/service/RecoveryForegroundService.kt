@@ -6,10 +6,12 @@ import android.app.NotificationManager
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
 import androidx.core.app.NotificationCompat
+import androidx.core.app.ServiceCompat
 import com.forensic.recover.root.RootBlockScanner
 import com.forensic.recover.scanner.AndroidCandidate
 import com.forensic.recover.scanner.NonRootScanner
@@ -18,6 +20,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import java.io.File
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
 import kotlin.concurrent.thread
 
 enum class ScanPhase {
@@ -29,6 +32,7 @@ enum class ScanPhase {
 }
 
 data class ScanServiceState(
+    val scanId: Long = 0L,
     val phase: ScanPhase = ScanPhase.IDLE,
     val progressPercent: Int = 0,
     val statusText: String = "Sẵn sàng",
@@ -53,25 +57,34 @@ class RecoveryForegroundService : Service() {
         const val EXTRA_BLOCK_DEVICE = "extra_block_device"
         const val EXTRA_DEST_IMAGE = "extra_dest_image"
         const val EXTRA_OUT_DIR = "extra_out_dir"
+        const val EXTRA_KNOWN_USERDATA = "extra_known_userdata"
 
         private val _state = MutableStateFlow(ScanServiceState())
         val state: StateFlow<ScanServiceState> = _state.asStateFlow()
 
         private val cancelRequested = AtomicBoolean(false)
-        private val runningFlag = AtomicBoolean(false)
+        private val runIdGenerator = AtomicLong(0L)
+        private val activeRunId = AtomicLong(0L)
+
+        fun nextScanId(): Long = runIdGenerator.incrementAndGet()
+
+        fun clearCancelFlag() {
+            cancelRequested.set(false)
+        }
 
         fun updateState(newState: ScanServiceState) {
             _state.value = newState
         }
 
         fun resetToIdle() {
-            if (!runningFlag.get()) {
-                _state.value = ScanServiceState()
+            if (activeRunId.get() == 0L) {
+                _state.value = ScanServiceState(scanId = _state.value.scanId)
             }
         }
 
         fun requestCancelFlag() {
             cancelRequested.set(true)
+            activeRunId.set(0L)
             RootBlockScanner.cancelActive()
         }
 
@@ -86,8 +99,8 @@ class RecoveryForegroundService : Service() {
         val action = intent?.action ?: ACTION_START
         if (action == ACTION_CANCEL) {
             cancelRequested.set(true)
+            activeRunId.set(0L)
             RootBlockScanner.cancelActive()
-            runningFlag.set(false)
             _state.value = _state.value.copy(
                 phase = ScanPhase.CANCELLED,
                 statusText = "Đã hủy quét theo yêu cầu."
@@ -98,7 +111,8 @@ class RecoveryForegroundService : Service() {
             return START_NOT_STICKY
         }
 
-        if (!runningFlag.compareAndSet(false, true)) {
+        val myRunId = runIdGenerator.incrementAndGet()
+        if (!activeRunId.compareAndSet(0L, myRunId)) {
             return START_NOT_STICKY
         }
 
@@ -107,6 +121,7 @@ class RecoveryForegroundService : Service() {
         val blockDevice = intent?.getStringExtra(EXTRA_BLOCK_DEVICE).orEmpty()
         val destImagePath = intent?.getStringExtra(EXTRA_DEST_IMAGE).orEmpty()
         val outDirPath = intent?.getStringExtra(EXTRA_OUT_DIR).orEmpty()
+        val knownUserdata = intent?.getStringExtra(EXTRA_KNOWN_USERDATA)
 
         val initialMsg = if (isRoot) {
             "Đang khởi tạo quét sâu Root + Rust JNI..."
@@ -115,6 +130,7 @@ class RecoveryForegroundService : Service() {
         }
 
         _state.value = ScanServiceState(
+            scanId = myRunId,
             phase = ScanPhase.RUNNING,
             progressPercent = 5,
             statusText = initialMsg,
@@ -124,10 +140,12 @@ class RecoveryForegroundService : Service() {
         )
 
         ensureChannel()
-        startForeground(NOTIF_ID, buildNotification(5, initialMsg))
+        startForegroundCompat(buildNotification(5, initialMsg))
         acquireWakeLock()
 
-        thread(start = true, name = "forensic-scan-worker") {
+        fun isStillCurrent(): Boolean = activeRunId.get() == myRunId && !cancelRequested.get()
+
+        thread(start = true, name = "forensic-scan-worker-$myRunId") {
             var completedNormally = false
             try {
                 if (isRoot) {
@@ -135,9 +153,10 @@ class RecoveryForegroundService : Service() {
                         blockDevice = blockDevice,
                         destImageFile = File(destImagePath),
                         outDir = File(outDirPath),
-                        isCancelled = { cancelRequested.get() },
+                        knownUserdataPath = knownUserdata,
+                        isCancelled = { !isStillCurrent() },
                         onProgressText = { pct, msg ->
-                            if (!cancelRequested.get()) {
+                            if (isStillCurrent()) {
                                 _state.value = _state.value.copy(
                                     progressPercent = pct,
                                     statusText = msg
@@ -146,14 +165,17 @@ class RecoveryForegroundService : Service() {
                             }
                         }
                     )
-                    if (cancelRequested.get()) {
-                        _state.value = _state.value.copy(
-                            phase = ScanPhase.CANCELLED,
-                            statusText = "Đã hủy quét Root/JNI."
-                        )
+                    if (!isStillCurrent()) {
+                        if (activeRunId.get() == 0L && _state.value.scanId == myRunId) {
+                            _state.value = _state.value.copy(
+                                phase = ScanPhase.CANCELLED,
+                                statusText = "Đã hủy quét Root/JNI."
+                            )
+                        }
                     } else if (res.ok) {
                         val doneMsg = "Hoàn tất quét Root/JNI: ${res.items.size} tệp"
                         _state.value = ScanServiceState(
+                            scanId = myRunId,
                             phase = ScanPhase.COMPLETED,
                             progressPercent = 100,
                             statusText = doneMsg,
@@ -165,6 +187,7 @@ class RecoveryForegroundService : Service() {
                     } else {
                         val err = res.error ?: "Quét Root/JNI thất bại."
                         _state.value = ScanServiceState(
+                            scanId = myRunId,
                             phase = ScanPhase.ERROR,
                             progressPercent = 0,
                             statusText = err,
@@ -175,9 +198,9 @@ class RecoveryForegroundService : Service() {
                 } else {
                     val found = NonRootScanner.scanAll(
                         context = applicationContext,
-                        isCancelled = { cancelRequested.get() }
+                        isCancelled = { !isStillCurrent() }
                     ) { pct, msg ->
-                        if (!cancelRequested.get()) {
+                        if (isStillCurrent()) {
                             _state.value = _state.value.copy(
                                 progressPercent = pct,
                                 statusText = msg
@@ -185,14 +208,17 @@ class RecoveryForegroundService : Service() {
                             updateNotification(pct, msg)
                         }
                     }
-                    if (cancelRequested.get()) {
-                        _state.value = _state.value.copy(
-                            phase = ScanPhase.CANCELLED,
-                            statusText = "Đã hủy quét."
-                        )
+                    if (!isStillCurrent()) {
+                        if (activeRunId.get() == 0L && _state.value.scanId == myRunId) {
+                            _state.value = _state.value.copy(
+                                phase = ScanPhase.CANCELLED,
+                                statusText = "Đã hủy quét."
+                            )
+                        }
                     } else {
                         val doneMsg = "Hoàn tất: tìm thấy ${found.size} tệp đã xác thực"
                         _state.value = ScanServiceState(
+                            scanId = myRunId,
                             phase = ScanPhase.COMPLETED,
                             progressPercent = 100,
                             statusText = doneMsg,
@@ -204,19 +230,24 @@ class RecoveryForegroundService : Service() {
                     }
                 }
             } catch (e: Exception) {
-                val err = "Lỗi quét: ${e.message ?: e.javaClass.simpleName}"
-                _state.value = ScanServiceState(
-                    phase = ScanPhase.ERROR,
-                    progressPercent = 0,
-                    statusText = err,
-                    errorMessage = err,
-                    isRootMode = isRoot
-                )
+                if (activeRunId.get() == myRunId) {
+                    val err = "Lỗi quét: ${e.message ?: e.javaClass.simpleName}"
+                    _state.value = ScanServiceState(
+                        scanId = myRunId,
+                        phase = ScanPhase.ERROR,
+                        progressPercent = 0,
+                        statusText = err,
+                        errorMessage = err,
+                        isRootMode = isRoot
+                    )
+                }
             } finally {
-                runningFlag.set(false)
-                releaseWakeLock()
-                stopForegroundCompat(removeNotification = !completedNormally)
-                stopSelf()
+                // Only clean up service resources if this worker is still the active run.
+                if (activeRunId.compareAndSet(myRunId, 0L)) {
+                    releaseWakeLock()
+                    stopForegroundCompat(removeNotification = !completedNormally)
+                    stopSelf()
+                }
             }
         }
         return START_NOT_STICKY
@@ -224,10 +255,26 @@ class RecoveryForegroundService : Service() {
 
     override fun onDestroy() {
         cancelRequested.set(true)
+        activeRunId.set(0L)
         RootBlockScanner.cancelActive()
-        runningFlag.set(false)
         releaseWakeLock()
         super.onDestroy()
+    }
+
+    private fun startForegroundCompat(notification: Notification) {
+        try {
+            val fgType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
+            } else {
+                0
+            }
+            ServiceCompat.startForeground(this, NOTIF_ID, notification, fgType)
+        } catch (_: Exception) {
+            try {
+                startForeground(NOTIF_ID, notification)
+            } catch (_: Exception) {
+            }
+        }
     }
 
     private fun stopForegroundCompat(removeNotification: Boolean) {

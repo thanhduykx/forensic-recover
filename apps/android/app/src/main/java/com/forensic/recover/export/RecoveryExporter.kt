@@ -169,41 +169,58 @@ object RecoveryExporter {
         return if (!name.isNullOrBlank()) "Thư mục đã chọn ($name)" else "Thư mục đã chọn"
     }
 
+    internal fun resolveJniExportOutDir(item: AndroidCandidate): String {
+        val outDir = item.jniOutDir?.trim()
+        if (outDir.isNullOrEmpty()) {
+            throw IllegalStateException("Thiếu thư mục phiên Rust JNI (jniOutDir) để nạp checkpoint.")
+        }
+        return outDir
+    }
+
+    internal fun parseJniExportedFilePath(rawResp: String): String {
+        val parsed = JSONObject(rawResp)
+        if (!parsed.optBoolean("ok", false)) {
+            throw IllegalStateException(parsed.optString("error").ifBlank { "Rust JNI xuất tệp thất bại" })
+        }
+        val paths = parsed.optJSONArray("data")
+        return paths?.optString(0)?.takeIf { it.isNotBlank() }
+            ?: throw IllegalStateException("Rust JNI không trả về đường dẫn tệp xuất")
+    }
+
     private fun openCandidateStreamAndWrite(
         context: Context,
         item: AndroidCandidate,
         uniqueName: String,
         safTree: DocumentFile?
     ): String {
-        // Case 1: Root/JNI item — ask Rust engine to carve into a temp dir first, then copy out safely.
+        // Case 1: Root/JNI item — Rust `export_selected` loads checkpoint from `item.jniOutDir`,
+        // carves into `<jniOutDir>/recovered/<family>/`, then we copy safely to Downloads/SAF.
         if (item.jniItemId != null && item.jniSourcePath != null) {
             if (!NativeRecoveryBridge.isNativeLoaded) {
                 throw IllegalStateException("Thư viện librecover_jni.so chưa sẵn sàng")
             }
-            val stageDir = File(context.cacheDir, "jni_export_stage_${System.nanoTime()}").apply { mkdirs() }
-            try {
-                val idsJson = JSONArray().put(item.jniItemId).toString()
-                val rawResp = NativeRecoveryBridge.nativeExportItems(
-                    item.jniSourcePath,
-                    stageDir.absolutePath,
-                    idsJson
-                )
-                val parsed = JSONObject(rawResp)
-                if (!parsed.optBoolean("ok", false)) {
-                    throw IllegalStateException(parsed.optString("error").ifBlank { "Rust JNI xuất tệp thất bại" })
-                }
-                val paths = parsed.optJSONArray("data")
-                val exportedPath = paths?.optString(0)?.takeIf { it.isNotBlank() }
-                    ?: throw IllegalStateException("Rust JNI không trả về đường dẫn tệp xuất")
-                val exportedFile = File(exportedPath)
-                if (!exportedFile.exists()) {
-                    throw IllegalStateException("Không tìm thấy tệp tạm sau khi giải mã")
-                }
-                return exportedFile.inputStream().use { input ->
+            val jniOutDir = resolveJniExportOutDir(item)
+            val idsJson = JSONArray().put(item.jniItemId).toString()
+            val rawResp = NativeRecoveryBridge.nativeExportItems(
+                item.jniSourcePath,
+                jniOutDir,
+                idsJson
+            )
+            val exportedPath = parseJniExportedFilePath(rawResp)
+            val exportedFile = File(exportedPath)
+            if (!exportedFile.exists()) {
+                throw IllegalStateException("Không tìm thấy tệp sau khi giải mã từ ảnh nguồn")
+            }
+            return try {
+                exportedFile.inputStream().use { input ->
                     writeStreamToDestination(context, input, uniqueName, item.detectedExt, safTree)
                 }
             } finally {
-                stageDir.deleteRecursively()
+                // Remove intermediate carved copy to avoid doubling SD usage while preserving checkpoint files.
+                try {
+                    exportedFile.delete()
+                } catch (_: Exception) {
+                }
             }
         }
 
@@ -267,7 +284,14 @@ object RecoveryExporter {
                 out.use { input.copyTo(it) }
                 val done = ContentValues().apply { put(MediaStore.Downloads.IS_PENDING, 0) }
                 resolver.update(uri, done, null, null)
-                return uniqueName
+                val actualName = try {
+                    resolver.query(uri, arrayOf(MediaStore.Downloads.DISPLAY_NAME), null, null, null)?.use { c ->
+                        if (c.moveToFirst()) c.getString(0) else null
+                    }
+                } catch (_: Exception) {
+                    null
+                }
+                return actualName?.takeIf { it.isNotBlank() } ?: uniqueName
             } catch (e: Exception) {
                 try {
                     resolver.delete(uri, null, null)

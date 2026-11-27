@@ -179,7 +179,7 @@ fun RecoveryThreeStepScreen() {
     }
 
     // Sync UI step with ForegroundService scan lifecycle.
-    LaunchedEffect(serviceState.phase) {
+    LaunchedEffect(serviceState.phase, serviceState.scanId) {
         when (serviceState.phase) {
             ScanPhase.RUNNING -> step = 2
             ScanPhase.COMPLETED -> {
@@ -218,9 +218,12 @@ fun RecoveryThreeStepScreen() {
 
         if (!startedService) {
             fallbackScanJob?.cancel()
+            RecoveryForegroundService.clearCancelFlag()
+            val scanId = RecoveryForegroundService.nextScanId()
             fallbackScanJob = scope.launch(Dispatchers.IO) {
                 RecoveryForegroundService.updateState(
                     ScanServiceState(
+                        scanId = scanId,
                         phase = ScanPhase.RUNNING,
                         progressPercent = 10,
                         statusText = "Đang quét nền (chế độ dự phòng)..."
@@ -231,21 +234,29 @@ fun RecoveryThreeStepScreen() {
                         context = context.applicationContext,
                         isCancelled = { RecoveryForegroundService.isCancelRequested() }
                     ) { pct, msg ->
-                        RecoveryForegroundService.updateState(
-                            ScanServiceState(
-                                phase = ScanPhase.RUNNING,
-                                progressPercent = pct,
-                                statusText = msg
+                        if (!RecoveryForegroundService.isCancelRequested()) {
+                            RecoveryForegroundService.updateState(
+                                ScanServiceState(
+                                    scanId = scanId,
+                                    phase = ScanPhase.RUNNING,
+                                    progressPercent = pct,
+                                    statusText = msg
+                                )
                             )
-                        )
+                        }
                     }
                     if (RecoveryForegroundService.isCancelRequested()) {
                         RecoveryForegroundService.updateState(
-                            ScanServiceState(phase = ScanPhase.CANCELLED, statusText = "Đã hủy quét.")
+                            ScanServiceState(
+                                scanId = scanId,
+                                phase = ScanPhase.CANCELLED,
+                                statusText = "Đã hủy quét."
+                            )
                         )
                     } else {
                         RecoveryForegroundService.updateState(
                             ScanServiceState(
+                                scanId = scanId,
                                 phase = ScanPhase.COMPLETED,
                                 progressPercent = 100,
                                 statusText = "Hoàn tất: tìm thấy ${found.size} tệp đã xác thực",
@@ -256,6 +267,7 @@ fun RecoveryThreeStepScreen() {
                 } catch (e: Exception) {
                     RecoveryForegroundService.updateState(
                         ScanServiceState(
+                            scanId = scanId,
                             phase = ScanPhase.ERROR,
                             statusText = "Lỗi quét: ${e.message}",
                             errorMessage = e.message
@@ -269,6 +281,7 @@ fun RecoveryThreeStepScreen() {
     fun startRootScan() {
         val blockDev = selectedBlockDevice.trim()
         val destRoot = rootDestDirPath.trim()
+        val knownUserdata = rootCaps?.userdataBlockPath
         if (blockDev.isBlank()) {
             bannerMessage = "Vui lòng chọn thiết bị khối (block device) để quét."
             return
@@ -277,9 +290,12 @@ fun RecoveryThreeStepScreen() {
             bannerMessage = "Vui lòng nhập thư mục ngoài để lưu ảnh tạm và kết quả."
             return
         }
-        val destImg = File(destRoot, "forensic_ro_${System.currentTimeMillis()}.img")
-        val outDir = File(destRoot, "forensic_out_${System.currentTimeMillis()}")
-        if (RootBlockScanner.isUnsafeSameVolumeDest(blockDev, destImg.absolutePath)) {
+        val ts = System.currentTimeMillis()
+        val destImg = File(destRoot, "forensic_ro_$ts.img")
+        val outDir = File(destRoot, "forensic_out_$ts")
+        if (RootBlockScanner.isUnsafeSameVolumeDest(blockDev, destImg.absolutePath, knownUserdata) ||
+            RootBlockScanner.isUnsafeSameVolumeDest(blockDev, outDir.absolutePath, knownUserdata)
+        ) {
             bannerMessage = "An toàn dữ liệu: Không thể ghi ảnh /userdata vào bộ nhớ trong (/data hoặc /storage/emulated). Hãy dùng thẻ nhớ ngoài SD hoặc USB-OTG."
             return
         }
@@ -291,6 +307,7 @@ fun RecoveryThreeStepScreen() {
             putExtra(RecoveryForegroundService.EXTRA_BLOCK_DEVICE, blockDev)
             putExtra(RecoveryForegroundService.EXTRA_DEST_IMAGE, destImg.absolutePath)
             putExtra(RecoveryForegroundService.EXTRA_OUT_DIR, outDir.absolutePath)
+            putExtra(RecoveryForegroundService.EXTRA_KNOWN_USERDATA, knownUserdata)
         }
         val startedService = try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -305,9 +322,12 @@ fun RecoveryThreeStepScreen() {
 
         if (!startedService) {
             fallbackScanJob?.cancel()
+            RecoveryForegroundService.clearCancelFlag()
+            val scanId = RecoveryForegroundService.nextScanId()
             fallbackScanJob = scope.launch(Dispatchers.IO) {
                 RecoveryForegroundService.updateState(
                     ScanServiceState(
+                        scanId = scanId,
                         phase = ScanPhase.RUNNING,
                         progressPercent = 10,
                         statusText = "Đang khởi tạo quét sâu Root + Rust JNI...",
@@ -318,21 +338,35 @@ fun RecoveryThreeStepScreen() {
                     blockDevice = blockDev,
                     destImageFile = destImg,
                     outDir = outDir,
+                    knownUserdataPath = knownUserdata,
                     isCancelled = { RecoveryForegroundService.isCancelRequested() },
                     onProgressText = { pct, msg ->
-                        RecoveryForegroundService.updateState(
-                            ScanServiceState(
-                                phase = ScanPhase.RUNNING,
-                                progressPercent = pct,
-                                statusText = msg,
-                                isRootMode = true
+                        if (!RecoveryForegroundService.isCancelRequested()) {
+                            RecoveryForegroundService.updateState(
+                                ScanServiceState(
+                                    scanId = scanId,
+                                    phase = ScanPhase.RUNNING,
+                                    progressPercent = pct,
+                                    statusText = msg,
+                                    isRootMode = true
+                                )
                             )
-                        )
+                        }
                     }
                 )
-                if (res.ok) {
+                if (RecoveryForegroundService.isCancelRequested()) {
                     RecoveryForegroundService.updateState(
                         ScanServiceState(
+                            scanId = scanId,
+                            phase = ScanPhase.CANCELLED,
+                            statusText = "Đã hủy quét Root/JNI.",
+                            isRootMode = true
+                        )
+                    )
+                } else if (res.ok) {
+                    RecoveryForegroundService.updateState(
+                        ScanServiceState(
+                            scanId = scanId,
                             phase = ScanPhase.COMPLETED,
                             progressPercent = 100,
                             statusText = "Hoàn tất quét Root/JNI: ${res.items.size} tệp",
@@ -343,6 +377,7 @@ fun RecoveryThreeStepScreen() {
                 } else {
                     RecoveryForegroundService.updateState(
                         ScanServiceState(
+                            scanId = scanId,
                             phase = ScanPhase.ERROR,
                             statusText = res.error ?: "Quét Root/JNI thất bại.",
                             errorMessage = res.error,
@@ -365,7 +400,11 @@ fun RecoveryThreeStepScreen() {
             context.startService(cancelIntent)
         } catch (_: Exception) {
             RecoveryForegroundService.updateState(
-                ScanServiceState(phase = ScanPhase.CANCELLED, statusText = "Đã hủy quét.")
+                ScanServiceState(
+                    scanId = RecoveryForegroundService.nextScanId(),
+                    phase = ScanPhase.CANCELLED,
+                    statusText = "Đã hủy quét."
+                )
             )
         }
     }
@@ -381,7 +420,9 @@ fun RecoveryThreeStepScreen() {
                     items = itemsToSave,
                     targetTreeUri = customTreeUri
                 ) { done, total, msg ->
-                    exportProgressText = "[$done/$total] $msg"
+                    scope.launch(Dispatchers.Main) {
+                        exportProgressText = "[$done/$total] $msg"
+                    }
                 }
             }
             savedItemIds = savedItemIds + summary.savedIds
@@ -599,7 +640,7 @@ fun RecoveryThreeStepScreen() {
                                     singleLine = true,
                                     modifier = Modifier.fillMaxWidth()
                                 )
-                                if (selectedBlockDevice.contains("userdata", ignoreCase = true)) {
+                                if (RootBlockScanner.isUserdataBlock(selectedBlockDevice, caps.userdataBlockPath)) {
                                     Spacer(Modifier.height(4.dp))
                                     Text(
                                         "Bắt buộc dùng đường dẫn trên thẻ nhớ ngoài SD hoặc USB-OTG khi quét /userdata.",

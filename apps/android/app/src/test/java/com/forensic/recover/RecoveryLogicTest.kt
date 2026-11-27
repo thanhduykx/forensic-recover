@@ -2,11 +2,14 @@ package com.forensic.recover
 
 import com.forensic.recover.export.RecoveryExporter
 import com.forensic.recover.root.RootBlockScanner
+import com.forensic.recover.scanner.AndroidCandidate
 import com.forensic.recover.scanner.NonRootScanner
+import com.forensic.recover.service.RecoveryForegroundService
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
+import org.junit.Assert.fail
 import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.TemporaryFolder
@@ -98,12 +101,81 @@ class RecoveryLogicTest {
     }
 
     @Test
-    fun isUnsafeSameVolumeDest_blocksInternalStorageForUserdata() {
+    fun isUnsafeSameVolumeDest_blocksInternalStorageForUserdataAndResolvedSymlink() {
         assertTrue(RootBlockScanner.isUnsafeSameVolumeDest("/dev/block/by-name/userdata", "/data/local/tmp/a.img"))
         assertTrue(RootBlockScanner.isUnsafeSameVolumeDest("/dev/block/by-name/userdata", "/storage/emulated/0/a.img"))
         assertTrue(RootBlockScanner.isUnsafeSameVolumeDest("/dev/block/by-name/userdata", "/sdcard/a.img"))
+        assertTrue(RootBlockScanner.isUnsafeSameVolumeDest("/dev/block/by-name/userdata", "/sdcard"))
         assertFalse(RootBlockScanner.isUnsafeSameVolumeDest("/dev/block/by-name/userdata", "/storage/1234-ABCD/a.img"))
         assertFalse(RootBlockScanner.isUnsafeSameVolumeDest("/dev/block/mmcblk1p1", "/storage/emulated/0/a.img"))
+
+        // Resolved symlink from `readlink -f /dev/block/by-name/userdata` (e.g. /dev/block/sda42)
+        // must STILL be blocked from writing to internal storage!
+        assertTrue(
+            RootBlockScanner.isUnsafeSameVolumeDest(
+                blockDevice = "/dev/block/sda42",
+                destPath = "/storage/emulated/0/Android/data/com.forensic.recover/files/forensic_ro_1.img",
+                knownUserdataPath = "/dev/block/sda42"
+            )
+        )
+        assertFalse(
+            RootBlockScanner.isUnsafeSameVolumeDest(
+                blockDevice = "/dev/block/sda42",
+                destPath = "/storage/1234-ABCD/forensic_ro_1.img",
+                knownUserdataPath = "/dev/block/sda42"
+            )
+        )
+    }
+
+    @Test
+    fun jniExportContract_requiresSessionOutDirAndParsesExportedPath() {
+        val goodCandidate = AndroidCandidate(
+            id = "jni_item-1",
+            title = "photo.jpg",
+            origin = "Root/JNI",
+            detectedExt = "jpg",
+            sizeBytes = 1024L,
+            confidence = "high",
+            sha256Prefix = "abcdef",
+            jniItemId = "item-1",
+            jniSourcePath = "/storage/1234-ABCD/forensic_ro_1.img",
+            jniOutDir = "/storage/1234-ABCD/forensic_out_1"
+        )
+        assertEquals("/storage/1234-ABCD/forensic_out_1", RecoveryExporter.resolveJniExportOutDir(goodCandidate))
+
+        val missingOutDir = goodCandidate.copy(jniOutDir = null)
+        try {
+            RecoveryExporter.resolveJniExportOutDir(missingOutDir)
+            fail("Expected IllegalStateException when jniOutDir is missing")
+        } catch (_: IllegalStateException) {
+            // expected
+        }
+
+        assertEquals(
+            "/storage/1234-ABCD/forensic_out_1/recovered/images/photo.jpg",
+            RecoveryExporter.parseJniExportedFilePath(
+                """{"ok":true,"data":["/storage/1234-ABCD/forensic_out_1/recovered/images/photo.jpg"],"error":null}"""
+            )
+        )
+        try {
+            RecoveryExporter.parseJniExportedFilePath("""{"ok":false,"data":null,"error":"Checkpoint missing"}""")
+            fail("Expected IllegalStateException on ok=false")
+        } catch (e: IllegalStateException) {
+            assertEquals("Checkpoint missing", e.message)
+        }
+    }
+
+    @Test
+    fun foregroundServiceCancelAndScanId_monotonicAndResettable() {
+        val id1 = RecoveryForegroundService.nextScanId()
+        val id2 = RecoveryForegroundService.nextScanId()
+        assertTrue(id2 > id1)
+
+        RecoveryForegroundService.requestCancelFlag()
+        assertTrue(RecoveryForegroundService.isCancelRequested())
+
+        RecoveryForegroundService.clearCancelFlag()
+        assertFalse(RecoveryForegroundService.isCancelRequested())
     }
 
     @Test
